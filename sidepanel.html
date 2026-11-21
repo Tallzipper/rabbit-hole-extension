@@ -1,17 +1,38 @@
 <!DOCTYPE html>
-    <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <link rel="stylesheet" href="./sidepanel.css">
-            <title>RabbitHole</title>
-        </head>
-        <body>
-            <header>
-                <h1>🐾 Rabbit Hole 🐇</h1>
-                <button id="openBurrowBtn"> Burrow View </button>
-            </header>
-            <p id="status"> Side panel ready</p>
-            <script src="./sidepanel.js"></script>
-        </body>
-    </html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rabbit Hole</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div class="vertical-sidebar">
+    <!-- Top Action Bar -->
+    <header class="hud-header">
+      <div class="brand-group">
+        <span>🐇</span>
+        <span class="brand-title">Rabbit Hole</span>
+      </div>
+      <div class="header-actions">
+        <button id="digBtn" class="header-btn" title="Start a burrow on the active tab">+ Dig</button>
+        <button id="burrowViewBtn" class="header-btn header-btn-accent" title="Open full-tab colony graph">Burrow View</button>
+      </div>
+    </header>
+
+    <!-- Optional Feedback Banner -->
+    <div id="statusBanner" class="status-banner hidden" role="status"></div>
+
+    <!-- Scrollable Dark Vertical Tab List (with Inline Trail Card) -->
+    <div class="tab-list" id="tabList" role="list"></div>
+
+    <!-- Bottom New Tab Bar -->
+    <button class="new-tab-btn" id="newTabBtn">
+      <span>+ New tab</span>
+      <span class="shortcut">Ctrl+T</span>
+    </button>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
