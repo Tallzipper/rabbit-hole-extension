@@ -1,22 +1,33 @@
 {
-    "manifest_version" : 3,
-    "name" :            "Rabbit Hole",
-    "version" :         "0.1.0",
-    "description" :     "Organize browser research into interconnected tunnels & burrow map",
-    "permissions" : [
-        "tabs", 
-        "sidePanel",
-        "storage"
-
-    ],
-    "background":{
-        "service_worker":   "background.js"
-    },
-    "side_panel":{
-        "default_path":     "sidepanel.html"
-    },
-    "action":{
-        "default_title":    "Open Rabbit Hole"
+  "manifest_version": 3,
+  "name": "Rabbit Hole",
+  "version": "0.2.0",
+  "description": "Track, organize, and explore your browsing trails and burrows.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "sidePanel",
+    "activeTab"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open Rabbit Hole"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "burrow.html",
+        "burrow.css",
+        "burrow.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
-
+  ]
 }
