@@ -1,4 +1,6 @@
-# Rabbit Hole - Rabbit Hole - Retrace your tabs
+
+
+# Rabbit Hole - Retrace your tabs
 
 Just like Alice tumbling into Wonderland, one search easily turns into twenty open tabs. Rabbit Hole automatically maps how you got there, quietly tracking your branching trails.
 
@@ -6,11 +8,24 @@ Just like Alice tumbling into Wonderland, one search easily turns into twenty op
 
 ## Images
 
-![Bad]()
-
-![Tabs_Mode]()
-
-![Burrow_Mode]()
+<table>
+  <tr>
+    <td align="center"><b>Normal Search History</b><br><sub>(Messy)</sub></td>
+    <td align="center"><b>Colony View</b><br><sub>(Dreamy)</sub></td>
+    <td align="center"><b>Side Panel Trail</b><br><sub>(Clean)</sub></td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img width="215" alt="Normal Search History" src="https://github.com/user-attachments/assets/ee5099da-507c-4cb3-89d2-e3a354d18db8" />
+    </td>
+    <td align="center">
+      <img width="330" alt="Colony View" src="https://github.com/user-attachments/assets/2aad66fb-01aa-430f-8bd5-ccc41a16626a" />
+    </td>
+    <td align="center">
+      <img width="230" alt="Side Panel Trail" src="https://github.com/user-attachments/assets/98b4a788-ecca-462e-ad23-a4abd563f63b" />
+    </td>
+  </tr>
+</table>
 
 ## Uses
   - Primary: Going down a rabbit hole and you want to know just how you ended up to where you were. Wasn't I just looking something up about fruit? Where did dogs come from?
