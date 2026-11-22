@@ -1,9 +1,9 @@
-let storageQueue = Promise.resolve(); // Keep storage writes in order so rapid tab events don't clobber each other
-const pendingOpenerMap = new Map(); // Holds parent info when a new tab opens before its URL loads
-const pendingStepJumpMap = new Map(); // Tracks manual step clicks so we move the highlight instead of duplicating
+let storageQueue = Promise.resolve(); // Mutex lock so rapid tab events don't overwrite each other in storage
+const pendingOpenerMap = new Map(); // Stashes parent tab info if a new tab opens before its URL loads
+const pendingStepJumpMap = new Map(); // Remembers manual step clicks so we move the cursor instead of duplicating
 
-const MAX_CLOSED_BURROWS = 25;
-const RESTORE_WINDOW_MS = 10 * 60 * 1000; // Give users 10 mins to hit Ctrl+Shift+T and bring a burrow back
+const MAX_CLOSED_BURROWS = 25; // Keep the last 25 closed burrows around for Ctrl+Shift+T recovery
+const RESTORE_WINDOW_MS = 10 * 60 * 1000; // 10-minute window to resurrect a closed burrow
 const BLOCKED_PREFIXES = [
   "edge://",
   "chrome://",
@@ -17,6 +17,7 @@ const SEARCH_HOSTS = ["bing.com", "google.com", "duckduckgo.com"];
 
 // --- Storage & Session --- //
 
+// Queues up read-modify-write ops on local storage so events run one at a time
 const withState = (fn) => {
   const next = storageQueue.then(async () => {
     const data = await chrome.storage.local.get(["burrows", "closedBurrows"]);
@@ -33,6 +34,7 @@ const withState = (fn) => {
   return next;
 };
 
+// Grab temp session data (1-page tabs waiting to become burrows + last focused tab)
 const getSession = async () => {
   const d = await chrome.storage.session.get([
     "untrackedFirstSteps",
@@ -44,12 +46,14 @@ const getSession = async () => {
   };
 };
 
+// Save or clear a tab's first page before it navigates a second time
 const setFirstStep = async (tabId, stepOrNull) => {
   const { firstSteps } = await getSession();
   stepOrNull ? (firstSteps[tabId] = stepOrNull) : delete firstSteps[tabId];
   await chrome.storage.session.set({ untrackedFirstSteps: firstSteps });
 };
 
+// Remember the last normal tab you looked at (helps catch cross-window forks)
 const recordExternalTab = (tabId, windowId, url) => {
   if (url && !isInternalURL(url)) {
     chrome.storage.session
@@ -66,6 +70,8 @@ const isInternalURL = (u) =>
   Boolean(u) && BLOCKED_PREFIXES.some((p) => u.startsWith(p));
 const isRedirectHop = (u) =>
   /bing\.com\/(ck\/a|aclick)|google\.com\/url\?/.test(u);
+
+// Keeps activeStepIndex safely inside the steps array
 const getActiveIdx = (b) =>
   Math.max(
     0,
@@ -94,12 +100,14 @@ function parseURL(raw) {
   }
 }
 
+// Skip internal browser pages, ad redirect wrappers, and blank search pages
 const isTrackableURL = (u) => {
   if (!u || isInternalURL(u) || isRedirectHop(u)) return false;
   const info = parseURL(u);
   return !(info && info.parsed.pathname.includes("/search") && !info.query);
 };
 
+// Cleans up URLs before comparing them so reloads and #anchors don't count as new steps
 function normalizeURLForCompare(raw) {
   const info = raw ? parseURL(raw) : null;
   if (!info) return raw || "";
@@ -107,11 +115,13 @@ function normalizeURLForCompare(raw) {
   if (isEngine && query)
     return `${parsed.protocol}//${host}/search?q=${query.toLowerCase()}`;
 
+  // Keep Gmail/SPA hash routes intact, strip normal page #anchors
   const hash = parsed.hash || "";
   if ((host === "mail.google.com" || /^#[!/]/.test(hash)) && hash.length > 1) {
     return `${parsed.protocol}//${host}${parsed.pathname.replace(/\/+$/, "")}${hash.split("?")[0].replace(/\/+$/, "")}`;
   }
 
+  // Drop tracking params, only keep meaningful IDs like YouTube ?v=
   const kept = new URLSearchParams();
   for (const k of ["v", "id", "p"])
     if (parsed.searchParams.get(k)) kept.set(k, parsed.searchParams.get(k));
@@ -119,6 +129,7 @@ function normalizeURLForCompare(raw) {
   return `${parsed.protocol}//${host}${parsed.pathname.replace(/\/+$/, "")}${qs ? `?${qs}` : ""}`;
 }
 
+// Fixes raw URLs or "New tab" titles with something cleaner
 function cleanStepTitle(url, rawTitle) {
   const info = parseURL(url);
   const fallback =
@@ -149,7 +160,7 @@ const buildStep = (
   title: cleanStepTitle(url, title),
   favIconUrl: favIconUrl || "",
   visitedAt: Date.now(),
-  inherited,
+  inherited, // True if we copied this step from a parent tab that got closed
 });
 
 const buildStepFromTab = (tab, url = "", inherited = false) =>
@@ -161,6 +172,7 @@ const buildStepFromTab = (tab, url = "", inherited = false) =>
     inherited,
   );
 
+// Pulls a tab's saved first page out of session storage when promoting it to a burrow
 async function consumeInitialStep(tab, fallbackUrl) {
   const { firstSteps } = await getSession();
   const saved = firstSteps[tab.id];
@@ -170,6 +182,7 @@ async function consumeInitialStep(tab, fallbackUrl) {
     : buildStepFromTab(tab, fallbackUrl);
 }
 
+// Removes a tabId from whichever burrow owns it
 function detachTabFromBurrows(burrows, tabId) {
   let dirty = false;
   for (const b of burrows) {
@@ -182,6 +195,7 @@ function detachTabFromBurrows(burrows, tabId) {
   return dirty;
 }
 
+// Collapses back-to-back duplicate URLs (like quick redirects) into a single step
 function deduplicateSteps(burrow) {
   if (!burrow?.steps || burrow.steps.length < 2) return;
   const out = [burrow.steps[0]];
@@ -201,6 +215,7 @@ function deduplicateSteps(burrow) {
   burrow.activeStepIndex = getActiveIdx(burrow);
 }
 
+// Creates a new burrow object (basically our PCB for a browsing trail)
 const createBurrow = (windowId, tabIds, steps = [], branchedFrom = null) => ({
   id: `burrow-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
   title: "New Research Burrow",
@@ -227,6 +242,8 @@ function tryResurrectClosedBurrow({
   if (!isTrackableURL(url) || !closedBurrows.length) return false;
   const norm = normalizeURLForCompare(url),
     now = Date.now();
+
+  // Check if this URL matches a burrow closed within the last 10 mins (Ctrl+Shift+T)
   const idx = closedBurrows.findIndex(
     (e) =>
       e &&
@@ -251,6 +268,7 @@ function tryResurrectClosedBurrow({
     activeStepIndex: Math.max(0, revived.steps.length - 1),
   });
 
+  // Hook back up to its original parent if that parent is still open
   if (revived.branchedFrom && alive.has(revived.branchedFrom.burrowId)) {
     const anc = alive.get(revived.branchedFrom.burrowId);
     if (!anc.branchedTo.some((l) => l.burrowId === revived.id)) {
@@ -263,6 +281,7 @@ function tryResurrectClosedBurrow({
     }
   } else revived.branchedFrom = null;
 
+  // Strip the temporary inherited steps we lent to any surviving children
   const inheritedSet = new Set(archived.inheritedStepIds || []);
   const fallbackSplit = revived.steps[revived.steps.length - 1] || null;
 
@@ -285,6 +304,7 @@ function tryResurrectClosedBurrow({
       gp.branchedTo = gp.branchedTo.filter((l) => l.burrowId !== child.id);
     }
 
+    // Re-link the child directly back to this revived parent
     const origin =
       revived.steps.find(
         (s) => s.stepId === archived.childSplitMap?.[child.id],
@@ -332,6 +352,7 @@ async function linkChildToParent(
     )
       return false;
 
+    // Promote the parent tab into a real burrow first if it was still just 1 page
     let parent = burrows.find((b) => b.tabIds.includes(opener.id));
     if (!parent) {
       parent = createBurrow(
@@ -343,6 +364,7 @@ async function linkChildToParent(
     }
     await setFirstStep(childTabId, null);
 
+    // Fork the child burrow off the parent's current active step
     const split = parent.steps[getActiveIdx(parent)];
     const child = createBurrow(
       childWindowId,
@@ -380,6 +402,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const url = tab.pendingUrl || tab.url || "";
   if (isInternalURL(url)) return;
 
+  // Catch cross-window forks when Chrome leaves openerTabId null
   let openerId = typeof tab.openerTabId === "number" ? tab.openerTabId : null;
   if (openerId === null && url) {
     const { lastActive } = await getSession();
@@ -392,6 +415,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   }
 
   if (typeof openerId === "number") {
+    // Fork right away if URL is ready, otherwise stash in pendingOpenerMap until onUpdated
     url
       ? linkChildToParent(tab.id, tab.windowId, url, openerId)
       : pendingOpenerMap.set(tab.id, {
@@ -399,6 +423,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
           windowId: tab.windowId,
         });
   } else if (url) {
+    // No parent tab -> see if this is a Ctrl+Shift+T restore
     withState(async ({ burrows, closedBurrows }) => {
       if (burrows.some((b) => b.tabIds.includes(tab.id))) return false;
       const ok = tryResurrectClosedBurrow({
@@ -415,6 +440,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  // Update the last-focused tab in case you drag/open a link into a new window
   try {
     const t = await chrome.tabs.get(tabId);
     recordExternalTab(tabId, windowId, t.pendingUrl || t.url || "");
@@ -436,6 +462,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url && tab.active)
     recordExternalTab(tabId, tab.windowId, changeInfo.url);
 
+  // Deferred fork: link to parent now that the new tab's URL finally loaded
   if (changeInfo.url && pendingOpenerMap.has(tabId)) {
     const p = pendingOpenerMap.get(tabId);
     pendingOpenerMap.delete(tabId);
@@ -449,6 +476,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     return;
   }
 
+  // Stop tracking if you navigate to chrome://, settings, etc.
   if (changeInfo.url && isInternalURL(changeInfo.url)) {
     setFirstStep(tabId, null).catch(() => {});
     withState((s) => {
@@ -461,14 +489,17 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
   if (!changeInfo.url && !changeInfo.title && !changeInfo.favIconUrl) return;
 
-  withState(async ({ burrows, closedBurrows }) => {
+withState(async ({ burrows, closedBurrows }) => {
     const burrow = burrows.find((b) => b.tabIds.includes(tabId));
+    if (burrow?.hidden) return false;
 
+    // Not in a burrow yet
     if (!burrow) {
       if (!isTrackableURL(url)) return false;
       const { firstSteps } = await getSession();
       const first = firstSteps[tabId] || null;
 
+      // 1st page: check for Ctrl+Shift+T restore, otherwise hold it in session storage
       if (!first) {
         if (
           tryResurrectClosedBurrow({
@@ -491,6 +522,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         return false;
       }
 
+      // Still on the 1st page, just update its title/favicon while waiting
       if (normalizeURLForCompare(url) === normalizeURLForCompare(first.url)) {
         let dirty = false;
         if (title) {
@@ -511,6 +543,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         return false;
       }
 
+      // 2-step promotion: you clicked to a 2nd page, so turn this tab into a real burrow
       await setFirstStep(tabId, null);
       const promoted = createBurrow(
         tab.windowId,
@@ -525,6 +558,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       return true;
     }
 
+    // Already in a burrow
     burrow.activeStepIndex = getActiveIdx(burrow);
     let changed = false,
       active = burrow.steps[burrow.activeStepIndex] || null;
@@ -534,6 +568,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         actNorm = active ? normalizeURLForCompare(active.url) : "";
       const jump = pendingStepJumpMap.get(tabId);
 
+      // Manual step click in the UI: move the active highlight without adding a duplicate
       if (jump && normalizeURLForCompare(jump.targetURL) === inNorm) {
         pendingStepJumpMap.delete(tabId);
         const idx = burrow.steps.findIndex((s, i) =>
@@ -547,6 +582,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
           changed = true;
         }
       } else if (inNorm !== actNorm) {
+        // Check if you hit browser Back or Forward (matches activeStepIndex - 1 or + 1)
         const adj = [
           burrow.activeStepIndex - 1,
           burrow.activeStepIndex + 1,
@@ -558,6 +594,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         );
         if (adj !== undefined) burrow.activeStepIndex = adj;
         else {
+          // Brand-new page: append it to the end of the trail
           burrow.steps.push(buildStep(tabId, changeInfo.url, title, favicon));
           deduplicateSteps(burrow);
           burrow.activeStepIndex = burrow.steps.length - 1;
@@ -570,6 +607,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       }
     }
 
+    // Fill in title/favicon once the page finishes loading, and update any forked child labels
     active = burrow.steps[burrow.activeStepIndex] || null;
     if (active && !active.inherited) {
       if (title) {
@@ -613,6 +651,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       ]),
     );
 
+    // Orphan reparenting: if a parent burrow closed, copy its steps into surviving children
     for (const child of surviving) {
       if (!child.branchedFrom || !dead.has(child.branchedFrom.burrowId))
         continue;
@@ -622,6 +661,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
         chain = [],
         ancestorLink = null;
 
+      // Walk up any chain of dead ancestors until we hit root or a living grandparent
       while (cursor) {
         const copied = (cursor.steps || []).map((s) => ({
           ...s,
@@ -645,6 +685,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
         cursor = dead.get(cursor.branchedFrom.burrowId) || null;
       }
 
+      // Prepend the inherited steps and shift activeStepIndex so the highlight stays on the right step
       const prevIdx = getActiveIdx(child);
       child.steps = [...chain, ...(child.steps || [])];
       child.activeStepIndex = Math.min(
@@ -652,6 +693,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
         Math.max(0, child.steps.length - 1),
       );
 
+      // Point the child to the nearest living ancestor (or make it a root burrow)
       if (ancestorLink) {
         const gp = alive.get(ancestorLink.burrowId);
         child.branchedFrom = {
@@ -671,6 +713,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       } else child.branchedFrom = null;
     }
 
+    // Save closed burrows to closedBurrows in case you hit Ctrl+Shift+T
     const now = Date.now();
     for (const p of pruned) {
       if (p.steps.some((s) => s.url && !isInternalURL(s.url))) {
@@ -683,6 +726,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     }
     state.closedBurrows = state.closedBurrows.slice(0, MAX_CLOSED_BURROWS);
 
+    // Clean up dead child links on surviving burrows
     for (const b of surviving) {
       b.branchedTo = b.branchedTo.filter((l) => alive.has(l.burrowId));
     }
@@ -694,56 +738,25 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // --- UI Message Routing --- //
 
 const MESSAGE_HANDLERS = {
-  async START_MANUAL_BURROW() {
-    const [tab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-    if (!tab || typeof tab.id !== "number")
-      return { ok: false, error: "No active tab found." };
 
-    const url = tab.pendingUrl || tab.url || "";
-    if (isInternalURL(url))
-      return {
-        ok: false,
-        error: "Cannot start a burrow on an internal browser page.",
-      };
-
-    let result = null;
-    await withState(async ({ burrows }) => {
-      const existing = burrows.find((b) => b.tabIds.includes(tab.id));
-      if (existing) {
-        existing.lastAccessedAt = Date.now();
-        result = existing;
-        return true;
-      }
-      result = createBurrow(
-        tab.windowId,
-        [tab.id],
-        [await consumeInitialStep(tab, url)],
-      );
-      burrows.push(result);
-      return true;
-    });
-    return { ok: true, burrow: result };
-  },
+  // Eye button: hide/unhide the hover card in the side panel
   async SET_BURROW_HIDDEN({ burrowId, hidden }) {
     let target = null;
-    await withState(({ burrows }) => {
-      target = burrows.find((b) => b.id === burrowId) || null;
-      if (!target) return false;
-      target.hidden = Boolean(hidden);
-      return true;
-    });
-    return target
-      ? { ok: true, burrow: target }
-      : { ok: false, error: "Burrow not found." };
-  },
-  async REGISTER_STEP_JUMP({ tabId, url, stepIndex }) {
-    if (typeof tabId === "number" && url)
-      pendingStepJumpMap.set(tabId, { targetURL: url, stepIndex });
-    return { ok: true };
-  },
+        await withState(({ burrows }) => {
+        target = burrows.find((b) => b.id === burrowId) || null;
+        if (!target) return false;
+        target.hidden = Boolean(hidden);
+        return true;
+        });
+        return target
+        ? { ok: true, burrow: target }
+        : { ok: false, error: "Burrow not found." };
+    },
+    async REGISTER_STEP_JUMP({ tabId, url, stepIndex }) {
+        if (typeof tabId === "number" && url)
+        pendingStepJumpMap.set(tabId, { targetURL: url, stepIndex });
+        return { ok: true };
+    },
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

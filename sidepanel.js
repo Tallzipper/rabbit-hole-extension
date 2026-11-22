@@ -118,10 +118,10 @@ function showStatusBanner(message, durationMs = 2800) {
 
 const findBurrowByTabId = (tabId) =>
   savedBurrows.find(
-    (b) => Array.isArray(b.tabIds) && b.tabIds.includes(tabId),
+    (b) => !b.hidden && Array.isArray(b.tabIds) && b.tabIds.includes(tabId),
   ) || null;
 const findBurrowById = (burrowId) =>
-  savedBurrows.find((b) => b.id === burrowId) || null;
+  savedBurrows.find((b) => !b.hidden && b.id === burrowId) || null;
 
 // --- State Hydration & Tab List Rendering --- //
 
@@ -191,10 +191,8 @@ function renderTabList() {
           }),
         burrow &&
           createElement("span", {
-            className: `hole-pill${burrow.hidden ? " is-muted" : ""}`,
-            title: burrow.hidden
-              ? "Hidden on hover (click tab to reopen)"
-              : "Active Rabbit Hole",
+            className: "hole-pill",
+            title: "Active Rabbit Hole",
             textContent: `🐇 ${resolveBurrowSteps(burrow, tabsById).length}`,
           }),
         createElement("span", {
@@ -216,7 +214,6 @@ function renderTabList() {
         renderTabList();
       } else if (
         burrow &&
-        !burrow.hidden &&
         (pinnedBurrowTabId === null || pinnedBurrowTabId === tab.id) &&
         hoveredBurrowTabId !== tab.id
       ) {
@@ -230,12 +227,6 @@ function renderTabList() {
       if (e.target.classList.contains("tab-close"))
         return (e.stopPropagation(), chrome.tabs.remove(tab.id));
       hoveredBurrowTabId = pinnedBurrowTabId = burrow ? tab.id : null;
-      if (burrow?.hidden)
-        await chrome.runtime.sendMessage({
-          type: "SET_BURROW_HIDDEN",
-          burrowId: burrow.id,
-          hidden: false,
-        });
       await chrome.tabs.update(tab.id, { active: true });
       await syncTabsAndRender();
     };
@@ -430,7 +421,7 @@ function buildBurrowTimelineCard(burrow, anchorTabId, tabsById) {
         { className: "popover-actions" },
         createElement("button", {
           className: "pop-btn",
-          title: "Hide Popup (Click tab to reopen)",
+          title: "Hide Burrow",
           textContent: "👁️",
           onclick: async (e) => {
             e.stopPropagation();
@@ -501,17 +492,6 @@ async function focusBranchedBurrow(targetBurrowId) {
 // --- Toolbar Controls & Live Event Listeners --- //
 
 function bindToolbarControls() {
-  // Wires the Dig, Colony View, New Tab, and empty-space unpin actions
-  document.getElementById("digBtn")?.addEventListener("click", async () => {
-    const res = await chrome.runtime.sendMessage({
-      type: "START_MANUAL_BURROW",
-    });
-    if (!res?.ok)
-      return showStatusBanner(res?.error || "Cannot start burrow on this tab.");
-    const activeTab = openWindowTabs.find((t) => t.active);
-    if (activeTab) hoveredBurrowTabId = pinnedBurrowTabId = activeTab.id;
-    await syncTabsAndRender();
-  });
   document
     .getElementById("burrowViewBtn")
     ?.addEventListener("click", () =>
